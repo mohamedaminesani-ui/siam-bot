@@ -26,7 +26,7 @@ from telegram.ext import (Application, CommandHandler, MessageHandler, CallbackQ
 logging.basicConfig(level=logging.INFO)
 import os
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656004270:AAEhk7pvVWVJnD2DAO0HoMMSK1Sio83QWvo")
-DB_PATH = "/content/siam_2025.db"
+DB_PATH = "/app/siam_2025.db"
 SKIP = "⏭ Passer"
 class DB:
     def __init__(self):
