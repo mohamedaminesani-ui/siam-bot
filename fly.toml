@@ -3,5 +3,5 @@ primary_region = "cdg"
 
 [build]
 
-[env]
-  PORT = "8080"
+[deploy]
+  strategy = "immediate"
