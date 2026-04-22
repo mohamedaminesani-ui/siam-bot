@@ -9,7 +9,8 @@ from reportlab.lib.styles import ParagraphStyle
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (Application, CommandHandler, MessageHandler, CallbackQueryHandler, ConversationHandler, ContextTypes, filters)
 logging.basicConfig(level=logging.INFO)
-BOT_TOKEN = "8656004270:AAEhk7pvVWVJnD2DAO0HoMMSK1Sio83QWvo"
+import os
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656004270:AAEhk7pvVWVJnD2DAO0HoMMSK1Sio83QWvo")
 DB_PATH = "/content/siam_2025.db"
 SKIP = "⏭ Passer"
 class DB:
