@@ -1,0 +1,7 @@
+app = "siam-bot"
+primary_region = "cdg"
+
+[build]
+
+[env]
+  PORT = "8080"
