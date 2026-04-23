@@ -262,7 +262,7 @@ def fmt(t):
     return "" if t in (SKIP, "/skip") else t
 
 # ── HANDLERS ────────────────────────────────────────────
-async def cmd_start(u, c):
+async def send_menu(u):
     n = db.count()
     await u.message.reply_text(
         f"🟢 *SIAM 2025 — Bot Intelligence Terrain*\n"
@@ -278,6 +278,9 @@ async def cmd_start(u, c):
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove()
     )
+
+async def cmd_start(u, c):
+    await send_menu(u)
 
 async def cmd_voir(u, c):
     stands = db.all()
@@ -329,6 +332,7 @@ async def cb_reset(u, c):
 
 async def cmd_cancel(u, c):
     await u.message.reply_text("❌ Saisie annulée.", reply_markup=ReplyKeyboardRemove())
+    await send_menu(u)
     return ConversationHandler.END
 
 async def cmd_supprimer(u, c):
@@ -432,6 +436,7 @@ async def s_rem(u, c):
     summary += f"\n_Total: {db.count()} stands · /stand pour continuer_"
 
     await u.message.reply_text(summary, parse_mode="Markdown", reply_markup=ReplyKeyboardRemove())
+    await send_menu(u)
     return ConversationHandler.END
 
 # ── MAIN ────────────────────────────────────────────────
