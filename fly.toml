@@ -6,6 +6,16 @@ primary_region = "cdg"
 [deploy]
   strategy = "immediate"
 
+# ⚠️ Persistance SQLite : sans volume monté, la base est effacée à chaque deploy.
+# Créer le volume une seule fois :
+#   fly volumes create siam_data --region cdg --size 1
+# Puis décommenter les deux sections ci-dessous et définir DB_PATH :
+#   fly secrets set DB_PATH=/data/siam_2025.db
+#
+# [[mounts]]
+#   source = "siam_data"
+#   destination = "/data"
+
 [[vm]]
   memory = "256mb"
   cpu_kind = "shared"

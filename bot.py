@@ -1,6 +1,11 @@
-import os, json, io, sqlite3, logging, threading
+import io
+import logging
+import os
+import sqlite3
+import threading
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.colors import HexColor, white
@@ -8,20 +13,28 @@ from reportlab.lib.enums import TA_LEFT, TA_CENTER, TA_RIGHT
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, PageBreak
 from reportlab.lib.styles import ParagraphStyle
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, ContextTypes, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, filters
 
 logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-import os, json, io, sqlite3, logging, threading
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "8656004270:AAEhk7pvVWVJnD2DAO0HoMMSK1Sio83QWvo")
-DB_PATH = "/app/siam_2025.db"
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+DB_PATH = os.environ.get("DB_PATH", "/app/siam_2025.db")
+HEALTH_PORT = int(os.environ.get("PORT", "8080"))
 SKIP = "⏭ Passer"
 
 # ── WEB SERVER (keep Fly.io happy) ─────────────────────
-class H(BaseHTTPRequestHandler):
-    def do_GET(self): self.send_response(200); self.end_headers(); self.wfile.write(b"OK")
-    def log_message(self, *a): pass
-threading.Thread(target=lambda: HTTPServer(("0.0.0.0", 8080), H).serve_forever(), daemon=True).start()
+class Health(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"OK")
+    def log_message(self, *a):
+        pass
+
+def start_health_server():
+    server = HTTPServer(("0.0.0.0", HEALTH_PORT), Health)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
 
 # ── DATABASE ────────────────────────────────────────────
 class DB:
@@ -239,9 +252,14 @@ SECTEURS = [
     ["💡 Autre"],
 ]
 
-def sec_kb(): return ReplyKeyboardMarkup(SECTEURS, one_time_keyboard=True, resize_keyboard=True)
-def skip_kb(): return ReplyKeyboardMarkup([[SKIP]], one_time_keyboard=True, resize_keyboard=True)
-def fmt(t): return "" if t == SKIP else t
+def sec_kb():
+    return ReplyKeyboardMarkup(SECTEURS, one_time_keyboard=True, resize_keyboard=True)
+
+def skip_kb():
+    return ReplyKeyboardMarkup([[SKIP]], one_time_keyboard=True, resize_keyboard=True)
+
+def fmt(t):
+    return "" if t in (SKIP, "/skip") else t
 
 # ── HANDLERS ────────────────────────────────────────────
 async def cmd_start(u, c):
@@ -255,6 +273,7 @@ async def cmd_start(u, c):
         f"🏪 /stand — Saisir un exposant\n"
         f"📊 /voir — Voir tous les stands\n"
         f"📄 /rapport — Générer le PDF\n"
+        f"🗑 /supprimer <id> — Supprimer un stand\n"
         f"🗑 /reset — Effacer tout",
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove()
@@ -268,26 +287,33 @@ async def cmd_voir(u, c):
     text = f"📊 *{len(stands)} stands enregistrés*\n\n"
     for s in stands:
         text += f"*{s['id']}. {s.get('societe','?')}*"
-        if s.get("num_stand"): text += f" · Stand {s['num_stand']}"
+        if s.get("num_stand"):
+            text += f" · Stand {s['num_stand']}"
         text += f"\n{s.get('secteur','')}\n"
-        if s.get("produits"): text += f"_{s['produits'][:60]}..._\n" if len(s.get("produits","")) > 60 else f"_{s['produits']}_\n"
+        produits = s.get("produits") or ""
+        if produits:
+            snippet = produits[:60] + "..." if len(produits) > 60 else produits
+            text += f"_{snippet}_\n"
         text += "\n"
     await u.message.reply_text(text, parse_mode="Markdown")
 
 async def cmd_rapport(u, c):
     if db.count() == 0:
-        await u.message.reply_text("⚠️ Aucune donnée. Commence par /stand"); return
+        await u.message.reply_text("⚠️ Aucune donnée. Commence par /stand")
+        return
     msg = await u.message.reply_text("⏳ Génération du rapport PDF...")
     try:
-        pdf = generate_pdf()
+        pdf_bytes = generate_pdf()
         await u.message.reply_document(
-            document=pdf, filename="SIAM_2025_Rapport.pdf",
+            document=io.BytesIO(pdf_bytes),
+            filename="SIAM_2025_Rapport.pdf",
             caption=f"📄 *SIAM 2025 — STIHL AF/ME*\n🏪 {db.count()} stands · Fiches + Tableau comparatif",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
         )
         await msg.delete()
-    except Exception as e:
-        await msg.edit_text(f"❌ Erreur : {e}")
+    except Exception:
+        logger.exception("Erreur génération PDF")
+        await msg.edit_text("❌ Erreur lors de la génération du PDF. Réessaie ou contacte l'admin.")
 
 async def cmd_reset(u, c):
     await u.message.reply_text("⚠️ Effacer tous les stands ?",
@@ -304,6 +330,18 @@ async def cb_reset(u, c):
 async def cmd_cancel(u, c):
     await u.message.reply_text("❌ Saisie annulée.", reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
+
+async def cmd_supprimer(u, c):
+    if not c.args:
+        await u.message.reply_text("Usage : /supprimer <id>  (voir les IDs via /voir)")
+        return
+    try:
+        sid = int(c.args[0])
+    except ValueError:
+        await u.message.reply_text("L'ID doit être un nombre entier.")
+        return
+    db.delete(sid)
+    await u.message.reply_text(f"🗑 Stand #{sid} supprimé (s'il existait).")
 
 # ── /stand conversation ──────────────────────────────────
 async def stand_start(u, c):
@@ -398,35 +436,40 @@ async def s_rem(u, c):
 
 # ── MAIN ────────────────────────────────────────────────
 def main():
-    from telegram.ext import ConversationHandler
+    start_health_server()
+
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("voir", cmd_voir))
     app.add_handler(CommandHandler("rapport", cmd_rapport))
+    app.add_handler(CommandHandler("supprimer", cmd_supprimer))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CallbackQueryHandler(cb_reset, pattern=r"^reset_"))
 
     TX = filters.TEXT & ~filters.COMMAND
+    # /skip est accepté pour les champs optionnels (tous sauf société/secteur/produits)
     stand_conv = ConversationHandler(
         entry_points=[CommandHandler("stand", stand_start)],
         states={
-            S_NUM:  [MessageHandler(TX, s_num)],
+            S_NUM:  [CommandHandler("skip", s_num),  MessageHandler(TX, s_num)],
             S_SOC:  [MessageHandler(TX, s_soc)],
             S_SEC:  [MessageHandler(TX, s_sec)],
             S_PROD: [MessageHandler(TX, s_prod)],
-            S_PRIX: [MessageHandler(TX, s_prix)],
-            S_CONC: [MessageHandler(TX, s_conc)],
-            S_GAP:  [MessageHandler(TX, s_gap)],
-            S_CONT: [MessageHandler(TX, s_cont)],
-            S_REM:  [MessageHandler(TX, s_rem)],
+            S_PRIX: [CommandHandler("skip", s_prix), MessageHandler(TX, s_prix)],
+            S_CONC: [CommandHandler("skip", s_conc), MessageHandler(TX, s_conc)],
+            S_GAP:  [CommandHandler("skip", s_gap),  MessageHandler(TX, s_gap)],
+            S_CONT: [CommandHandler("skip", s_cont), MessageHandler(TX, s_cont)],
+            S_REM:  [CommandHandler("skip", s_rem),  MessageHandler(TX, s_rem)],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],
         allow_reentry=True,
     )
     app.add_handler(stand_conv)
 
-    print("🟢 Bot SIAM 2025 — Nouveau format démarré !")
+    logger.info("Bot SIAM 2025 démarré.")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
-main()
+
+if __name__ == "__main__":
+    main()
