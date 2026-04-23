@@ -15,6 +15,11 @@ from reportlab.lib.styles import ParagraphStyle
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, ConversationHandler, CallbackQueryHandler, filters
 
+try:
+    from openai import AsyncOpenAI
+except ImportError:
+    AsyncOpenAI = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -22,6 +27,19 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 DB_PATH = os.environ.get("DB_PATH", "/app/siam_2025.db")
 HEALTH_PORT = int(os.environ.get("PORT", "8080"))
 SKIP = "⏭ Passer"
+
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+ai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if (AsyncOpenAI and OPENAI_API_KEY) else None
+
+AI_SYSTEM_PROMPT = (
+    "Tu es un analyste stratégique pour STIHL AF/ME (Afrique/Moyen-Orient), "
+    "spécialiste des outils motorisés (tronçonneuses, débroussailleuses, souffleurs, etc.). "
+    "On te donne des données terrain collectées au salon SIAM 2025 au Maroc. "
+    "Réponds en français, de manière concise, concrète, actionnable, orientée \"comment STIHL doit réagir\". "
+    "Utilise des bullet points. Maximum ~15 lignes sauf demande explicite d'un rapport long."
+)
+TG_MAX_LEN = 3800
 
 # ── WEB SERVER (keep Fly.io happy) ─────────────────────
 class Health(BaseHTTPRequestHandler):
@@ -273,6 +291,8 @@ async def send_menu(u):
         f"🏪 /stand — Saisir un exposant\n"
         f"📊 /voir — Voir tous les stands\n"
         f"📄 /rapport — Générer le PDF\n"
+        f"🤖 /analyser — Synthèse stratégique IA\n"
+        f"🤖 /ask <question> — Question libre à l'IA\n"
         f"🗑 /supprimer <id> — Supprimer un stand\n"
         f"🗑 /reset — Effacer tout",
         parse_mode="Markdown",
@@ -317,6 +337,86 @@ async def cmd_rapport(u, c):
     except Exception:
         logger.exception("Erreur génération PDF")
         await msg.edit_text("❌ Erreur lors de la génération du PDF. Réessaie ou contacte l'admin.")
+
+def _format_stands_for_ai():
+    stands = db.all()
+    if not stands:
+        return ""
+    blocks = []
+    for s in stands:
+        parts = [f"#{s['id']} — {s.get('societe','?')} ({s.get('secteur','') or 'secteur ?'})"]
+        if s.get("num_stand"): parts.append(f"Stand: {s['num_stand']}")
+        if s.get("produits"): parts.append(f"Produits: {s['produits']}")
+        if s.get("prix"): parts.append(f"Prix: {s['prix']}")
+        if s.get("machines_conc"): parts.append(f"Machines concurrentes: {s['machines_conc']}")
+        if s.get("gap_stihl"): parts.append(f"GAP vs STIHL: {s['gap_stihl']}")
+        if s.get("remarque"): parts.append(f"Remarque: {s['remarque']}")
+        blocks.append("\n  ".join(parts))
+    return "\n\n".join(blocks)
+
+async def _call_openai(user_content, max_tokens=1500):
+    resp = await ai_client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": AI_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        max_tokens=max_tokens,
+        temperature=0.3,
+    )
+    return resp.choices[0].message.content or ""
+
+async def cmd_analyser(u, c):
+    if ai_client is None:
+        await u.message.reply_text("⚠️ IA non configurée. Définis OPENAI_API_KEY.")
+        return
+    data = _format_stands_for_ai()
+    if not data:
+        await u.message.reply_text("⚠️ Aucune donnée à analyser. Commence par /stand")
+        return
+    msg = await u.message.reply_text("🤖 Analyse en cours…")
+    try:
+        prompt = (
+            f"Voici les {db.count()} stands visités au SIAM 2025 :\n\n{data}\n\n"
+            "Produis une synthèse stratégique pour STIHL AF/ME :\n"
+            "1) Top 3 concurrents les plus menaçants et pourquoi.\n"
+            "2) Gaps produits majeurs où STIHL est absent ou faible.\n"
+            "3) 3 recommandations prioritaires et concrètes.\n"
+        )
+        text = await _call_openai(prompt, max_tokens=1500)
+        await msg.edit_text(("🤖 Analyse IA\n\n" + text)[:TG_MAX_LEN])
+    except Exception:
+        logger.exception("Erreur OpenAI /analyser")
+        await msg.edit_text("❌ Erreur lors de l'appel à l'IA. Réessaie plus tard.")
+
+async def cmd_ask(u, c):
+    if ai_client is None:
+        await u.message.reply_text("⚠️ IA non configurée. Définis OPENAI_API_KEY.")
+        return
+    if not c.args:
+        await u.message.reply_text(
+            "Usage : /ask <ta question>\n"
+            "Ex : /ask quels sont les 3 concurrents les plus agressifs ?"
+        )
+        return
+    question = " ".join(c.args).strip()
+    data = _format_stands_for_ai()
+    if not data:
+        await u.message.reply_text("⚠️ Aucune donnée. Commence par /stand")
+        return
+    msg = await u.message.reply_text("🤖 Réflexion…")
+    try:
+        prompt = (
+            f"Données terrain ({db.count()} stands) :\n\n{data}\n\n"
+            f"Question de l'utilisateur : {question}\n"
+            "Réponds en t'appuyant uniquement sur les données ci-dessus. "
+            "Si la réponse ne peut pas être déduite, dis-le clairement."
+        )
+        text = await _call_openai(prompt, max_tokens=1000)
+        await msg.edit_text(("🤖 " + text)[:TG_MAX_LEN])
+    except Exception:
+        logger.exception("Erreur OpenAI /ask")
+        await msg.edit_text("❌ Erreur lors de l'appel à l'IA.")
 
 async def cmd_reset(u, c):
     await u.message.reply_text("⚠️ Effacer tous les stands ?",
@@ -448,6 +548,8 @@ def main():
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("voir", cmd_voir))
     app.add_handler(CommandHandler("rapport", cmd_rapport))
+    app.add_handler(CommandHandler("analyser", cmd_analyser))
+    app.add_handler(CommandHandler("ask", cmd_ask))
     app.add_handler(CommandHandler("supprimer", cmd_supprimer))
     app.add_handler(CommandHandler("reset", cmd_reset))
     app.add_handler(CallbackQueryHandler(cb_reset, pattern=r"^reset_"))
